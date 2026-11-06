@@ -1,0 +1,6 @@
+node_modules/
+.profile/
+auth.json
+models-store.json
+sessions/
+.DS_Store
