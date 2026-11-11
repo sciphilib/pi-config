@@ -3,6 +3,8 @@ import { Type } from "typebox";
 import { Text } from "@mariozechner/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as os from "node:os";
+import { spawn, execFileSync } from "node:child_process";
 
 interface SearchResult {
 	title: string;
@@ -26,59 +28,199 @@ interface BuiltSearchQuery {
 	site?: string;
 }
 
-async function googleSearch(
-	query: string,
-	count: number,
-	apiKey: string,
-	cseId: string,
-	signal?: AbortSignal,
-): Promise<SearchResult[]> {
-	const num = Math.min(count, 10);
-	const url = new URL("https://www.googleapis.com/customsearch/v1");
-	url.searchParams.set("key", apiKey);
-	url.searchParams.set("cx", cseId);
-	url.searchParams.set("q", query);
-	url.searchParams.set("num", String(num));
+// ---------------------------------------------------------------------------
+// Local SearXNG, started on demand and stopped after idle time
+// ---------------------------------------------------------------------------
 
-	const resp = await fetch(url.toString(), { signal });
-	if (!resp.ok) {
-		const body = await resp.text();
-		throw new Error(`Google API ${resp.status}: ${body.slice(0, 200)}`);
-	}
+const SEARXNG_DIR = path.join(os.homedir(), ".pi", "agent", "searxng");
+const SEARXNG_SRC = path.join(SEARXNG_DIR, "src");
+const SEARXNG_PYTHON = path.join(SEARXNG_DIR, "venv", "bin", "python");
+const SEARXNG_SETTINGS = path.join(SEARXNG_DIR, "settings.yml");
+const SEARXNG_LOG = path.join(SEARXNG_DIR, "searxng.log");
+const LAST_USED_FILE = path.join(SEARXNG_DIR, "last-used.json");
+const SEARXNG_PORT = Number(process.env.SEARXNG_PORT ?? 8899);
+const SEARXNG_URL = `http://127.0.0.1:${SEARXNG_PORT}`;
+const IDLE_MS = Number(process.env.SEARXNG_IDLE_MINUTES ?? 10) * 60_000;
+const STARTUP_TIMEOUT_MS = 30_000;
 
-	const data = (await resp.json()) as {
-		items?: Array<{
-			title: string;
-			link: string;
-			snippet?: string;
-		}>;
-	};
+let idleTimer: ReturnType<typeof setTimeout> | undefined;
+let startingPromise: Promise<void> | undefined;
 
-	if (!data.items || data.items.length === 0) return [];
-
-	return data.items.map((item) => ({
-		title: item.title,
-		url: item.link,
-		snippet: item.snippet?.replace(/\n/g, " ") ?? "",
-	}));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) return reject(new Error("Aborted"));
+		const t = setTimeout(resolve, ms);
+		signal?.addEventListener(
+			"abort",
+			() => {
+				clearTimeout(t);
+				reject(new Error("Aborted"));
+			},
+			{ once: true },
+		);
+	});
 }
 
-const EXT_DIR = path.dirname(new URL(import.meta.url).pathname);
-const AUTH_PATH = path.join(EXT_DIR, "auth.json");
-
-function loadCredentials(): { apiKey: string; cseId: string } | null {
-	const envApiKey = process.env.GOOGLE_SEARCH_API_KEY ?? process.env.GOOGLE_API_KEY;
-	const envCseId = process.env.GOOGLE_CSE_ID ?? process.env.GOOGLE_CUSTOM_SEARCH_ENGINE_ID;
-	if (envApiKey && envCseId) return { apiKey: envApiKey, cseId: envCseId };
-
-	if (!fs.existsSync(AUTH_PATH)) return null;
+async function isHealthy(): Promise<boolean> {
 	try {
-		const config = JSON.parse(fs.readFileSync(AUTH_PATH, "utf-8"));
-		const apiKey = config.google_search_api_key as string;
-		const cseId = config.google_cse_id as string;
-		if (apiKey && cseId) return { apiKey, cseId };
+		const resp = await fetch(`${SEARXNG_URL}/healthz`, {
+			signal: AbortSignal.timeout(1500),
+		});
+		return resp.ok;
+	} catch {
+		return false;
+	}
+}
+
+/** PIDs of searx.webapp processes listening on our port (never anything else). */
+function findSearxngPids(): number[] {
+	try {
+		const out = execFileSync(
+			"lsof",
+			["-nP", `-iTCP:${SEARXNG_PORT}`, "-sTCP:LISTEN", "-t"],
+			{ encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] },
+		);
+		const pids = [...new Set(out.split(/\s+/).filter(Boolean).map(Number))];
+		return pids.filter((pid) => {
+			try {
+				const cmd = execFileSync("ps", ["-o", "command=", "-p", String(pid)], {
+					encoding: "utf-8",
+					stdio: ["ignore", "pipe", "ignore"],
+				});
+				return cmd.includes("searx.webapp");
+			} catch {
+				return false;
+			}
+		});
+	} catch {
+		return [];
+	}
+}
+
+function readLastUsed(): { pid: number; time: number } | null {
+	try {
+		return JSON.parse(fs.readFileSync(LAST_USED_FILE, "utf-8"));
+	} catch {
+		return null;
+	}
+}
+
+function markUsed(): void {
+	try {
+		fs.writeFileSync(
+			LAST_USED_FILE,
+			JSON.stringify({ pid: process.pid, time: Date.now() }),
+		);
 	} catch {}
-	return null;
+}
+
+function stopSearxng(): void {
+	for (const pid of findSearxngPids()) {
+		try {
+			process.kill(pid, "SIGTERM");
+		} catch {}
+	}
+}
+
+function clearIdleTimer(): void {
+	if (idleTimer) clearTimeout(idleTimer);
+	idleTimer = undefined;
+}
+
+/** Check shared last-used time; stop the server if idle, otherwise re-arm. */
+function checkIdle(): void {
+	clearIdleTimer();
+	const last = readLastUsed();
+	const idleFor = last ? Date.now() - last.time : Infinity;
+	if (idleFor >= IDLE_MS) {
+		stopSearxng();
+		return;
+	}
+	idleTimer = setTimeout(checkIdle, IDLE_MS - idleFor + 1000);
+	idleTimer.unref?.();
+}
+
+async function startSearxng(signal?: AbortSignal): Promise<void> {
+	if (!fs.existsSync(SEARXNG_PYTHON) || !fs.existsSync(SEARXNG_SETTINGS)) {
+		throw new Error(
+			`SearXNG is not installed in ${SEARXNG_DIR} (expected venv/bin/python and settings.yml).`,
+		);
+	}
+	const logFd = fs.openSync(SEARXNG_LOG, "w");
+	const child = spawn(SEARXNG_PYTHON, ["-m", "searx.webapp"], {
+		cwd: SEARXNG_SRC,
+		env: { ...process.env, SEARXNG_SETTINGS_PATH: SEARXNG_SETTINGS },
+		detached: true,
+		stdio: ["ignore", logFd, logFd],
+	});
+	child.unref();
+	fs.closeSync(logFd);
+
+	let exited = false;
+	child.once("exit", () => {
+		exited = true;
+	});
+
+	const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+	while (Date.now() < deadline) {
+		if (await isHealthy()) return;
+		// Another pi window may have won the race for the port; that's fine.
+		if (exited && (await isHealthy())) return;
+		if (exited) break;
+		await sleep(300, signal);
+	}
+	if (await isHealthy()) return;
+	throw new Error(`SearXNG failed to start. See log: ${SEARXNG_LOG}`);
+}
+
+async function ensureSearxng(signal?: AbortSignal): Promise<void> {
+	if (await isHealthy()) return;
+	if (!startingPromise) {
+		startingPromise = startSearxng(signal).finally(() => {
+			startingPromise = undefined;
+		});
+	}
+	await startingPromise;
+}
+
+async function searxngSearch(
+	query: string,
+	count: number,
+	signal?: AbortSignal,
+): Promise<SearchResult[]> {
+	markUsed();
+	await ensureSearxng(signal);
+
+	const url = new URL(`${SEARXNG_URL}/search`);
+	url.searchParams.set("q", query);
+	url.searchParams.set("format", "json");
+
+	try {
+		const resp = await fetch(url.toString(), { signal });
+		if (!resp.ok) {
+			const body = await resp.text();
+			throw new Error(`SearXNG ${resp.status}: ${body.slice(0, 300)}`);
+		}
+		const data = (await resp.json()) as {
+			results?: Array<{ title?: string; url: string; content?: string }>;
+		};
+		const seen = new Set<string>();
+		const results: SearchResult[] = [];
+		for (const item of data.results ?? []) {
+			if (!item.url || seen.has(item.url)) continue;
+			seen.add(item.url);
+			results.push({
+				title: (item.title ?? "").trim(),
+				url: item.url,
+				snippet: (item.content ?? "").replace(/\s+/g, " ").trim(),
+			});
+			if (results.length >= count) break;
+		}
+		return results;
+	} finally {
+		markUsed();
+		checkIdle();
+	}
 }
 
 function formatResults(results: SearchResult[]): string {
@@ -162,11 +304,25 @@ function buildSearchQuery(args: StructuredSearchArgs): BuiltSearchQuery {
 }
 
 export default function (pi: ExtensionAPI) {
+	pi.on("session_start", async () => {
+		// Handle a server orphaned by a crashed or killed pi: stop if idle, else re-arm.
+		if (findSearxngPids().length > 0) checkIdle();
+	});
+
+	pi.on("session_shutdown", async (event) => {
+		clearIdleTimer();
+		if (event.reason !== "quit") return;
+		const last = readLastUsed();
+		// Stop on exit only if this window was the last user; otherwise the
+		// other window's idle timer is responsible.
+		if (last?.pid === process.pid) stopSearxng();
+	});
+
 	pi.registerTool({
 		name: "web_search",
 		label: "Web Search",
 		description:
-			"Search the web via Google Custom Search API. Build one search per call from a base query string, exact phrases, exclusions, and an optional site. Returns title, URL, and snippet.",
+			"Search the web via a local SearXNG instance (started on demand). Build one search per call from a base query string, exact phrases, exclusions, and an optional site. Returns title, URL, and snippet.",
 		promptSnippet:
 			"Search the web via a query string plus optional exactPhrases, excludeTerms, and site. Use one tool call per search angle.",
 		promptGuidelines: [
@@ -184,7 +340,7 @@ export default function (pi: ExtensionAPI) {
 			exactPhrases: Type.Optional(
 				Type.Array(Type.String(), {
 					description:
-						"Exact phrases to match. Each item becomes a quoted phrase in the final Google query.",
+						"Exact phrases to match. Each item becomes a quoted phrase in the final search query.",
 				}),
 			),
 			excludeTerms: Type.Optional(
@@ -201,30 +357,17 @@ export default function (pi: ExtensionAPI) {
 			),
 			count: Type.Optional(
 				Type.Number({
-					description: "Number of results to return (default: 5, max: 10)",
+					description: "Number of results to return (default: 5, max: 20)",
 					minimum: 1,
-					maximum: 10,
+					maximum: 20,
 				}),
 			),
 		}),
 
 		async execute(_toolCallId, params: StructuredSearchArgs, signal) {
-			const creds = loadCredentials();
-			if (!creds) {
-				throw new Error(
-					`Missing Google Custom Search credentials. Set GOOGLE_SEARCH_API_KEY and GOOGLE_CSE_ID, or create ${AUTH_PATH} from auth.example.json. Get credentials from https://developers.google.com/custom-search/v1/introduction`,
-				);
-			}
-
-			const count = params.count ?? 5;
+			const count = Math.min(Math.max(params.count ?? 5, 1), 20);
 			const built = buildSearchQuery(params);
-			const results = await googleSearch(
-				built.query,
-				count,
-				creds.apiKey,
-				creds.cseId,
-				signal,
-			);
+			const results = await searxngSearch(built.query, count, signal);
 
 			return {
 				content: [

@@ -1,32 +1,27 @@
 # pi-config
 
-My personal [pi](https://github.com/earendil-works/pi) configuration: extensions, skills, keybindings and settings.
+My config for [pi](https://github.com/earendil-works/pi): extensions, skills, keybindings and settings.
 
 ## Credits
 
-This config is **based on [amosblomqvist/pi-config](https://github.com/amosblomqvist/pi-config)** by Amos Blomqvist, from his videos [My Pi Setup After 6 Months](https://www.youtube.com/@EeroAlvar) and [Pi Coding Agent Setup After 2 Months](https://www.youtube.com/watch?v=DWWrLlM3gwQ). Most of the extensions and skills here originate from his repo, and I'm grateful for his work. Some of them I have modified. Please see the original for the up-to-date versions, and star it.
+Most of this comes from [amosblomqvist/pi-config](https://github.com/amosblomqvist/pi-config) by Amos Blomqvist. He talks about it in [My Pi Setup After 6 Months](https://www.youtube.com/@EeroAlvar) and [Pi Coding Agent Setup After 2 Months](https://www.youtube.com/watch?v=DWWrLlM3gwQ). Thanks, Amos! Check out his repo for the latest versions.
 
-| Item | Origin |
-| --- | --- |
-| `extensions/ask-user-question.ts`, `bash-guard/`, `browser/`, `custom-header.ts`, `prompt-snippets/`, `web-fetch/`, `web-search/` | [amosblomqvist/pi-config](https://github.com/amosblomqvist/pi-config) (some modified by me) |
-| `skills/analyze-sessions`, `pdf-reader`, `web-debug`, `youtube-transcript` | [amosblomqvist/pi-config](https://github.com/amosblomqvist/pi-config) |
-| `extensions/minimal-footer.ts`, `session-status/` | my own |
+From his repo, some of them changed by me:
 
-The upstream repository has no license file at the time of writing, so all rights to the upstream parts remain with their author.
+- extensions: `ask-user-question.ts`, `bash-guard`, `browser`, `custom-header.ts`, `prompt-snippets`, `web-fetch`, `web-search`
+- skills: `analyze-sessions`, `pdf-reader`, `web-debug`, `youtube-transcript`
+
+Mine: `minimal-footer.ts`, `session-status`.
+
+His repo has no license yet, so the rights to his parts stay with him.
 
 ## Install
-
-Full Ubuntu walkthrough (Node 22, pi, Chromium, secrets): see [INSTALL.md](INSTALL.md). Short version:
 
 ```bash
 git clone git@github.com:sciphilib/pi-config.git ~/pi-config
 ~/pi-config/install.sh
 ```
 
-The script symlinks the config into `~/.pi/agent` (existing files are backed up as `*.bak.<timestamp>`) and runs `npm ci` for extensions that have a `package.json`.
+The script links everything into `~/.pi/agent`, installs the npm dependencies and sets up SearXNG for web search. Old files are kept as `*.bak.<timestamp>`.
 
-## Contents
-
-- `agent/extensions` — ask-user-question, bash-guard, browser, custom-header, minimal-footer, prompt-snippets, session-status, web-fetch, web-search
-- `agent/skills` — analyze-sessions, pdf-reader, web-debug, youtube-transcript
-- `agent/keybindings.json`, `agent/settings.json`
+Setting up a fresh Ubuntu machine from scratch: [INSTALL.md](INSTALL.md).
