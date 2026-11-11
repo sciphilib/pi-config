@@ -16,6 +16,8 @@ The upstream repository has no license file at the time of writing, so all right
 
 ## Install
 
+Full Ubuntu walkthrough (Node 22, pi, Chromium, secrets): see [INSTALL.md](INSTALL.md). Short version:
+
 ```bash
 git clone git@github.com:sciphilib/pi-config.git ~/pi-config
 ~/pi-config/install.sh

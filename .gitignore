@@ -4,3 +4,4 @@ auth.json
 models-store.json
 sessions/
 .DS_Store
+.venv/
