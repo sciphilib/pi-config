@@ -11,7 +11,7 @@ From his repo, some of them changed by me:
 - extensions: `ask-user-question.ts`, `bash-guard`, `browser`, `custom-header.ts`, `prompt-snippets`, `web-fetch`, `web-search`
 - skills: `analyze-sessions`, `pdf-reader`, `web-debug`, `youtube-transcript`
 
-Mine: `minimal-footer.ts`, `session-status`.
+Mine: `minimal-editor.ts`, `minimal-footer.ts`, `session-status`.
 
 His repo has no license yet, so the rights to his parts stay with him.
 
